@@ -54,7 +54,10 @@
 ORD Ledger Template — Auditable Per-Trade Log for Any Pine Indicator
 ```
 
-**描述：**
+（标题中文意译：ORD 账本模板 —— 给任何 Pine 指标用的可审计逐笔日志。
+标题栏放不下双语，标题就按英文粘贴；描述是英中对照的，看不懂英文的读者也能看明白。）
+
+**描述（英中逐段对照，整段粘贴即可）：**
 
 ```
 ORD Ledger Template (with EMA-cross demo host)
@@ -66,25 +69,44 @@ simulated trade as a CSV row in the Pine Logs:
 - one ORD row per closed trade (entry/exit time and price, exit reason,
 gross/net R after fees, net U, bars held),
 - a HOL snapshot row for the position still open at the data end.
+这是一个可直接嵌入 indicator()（指标）脚本的账本代码块。它把每一笔
+模拟交易记成 Pine 日志里的一行 CSV：
+- 一行 CFG 首行，自证脚本的参数与图表周期；
+- 每笔平仓一行 ORD（开仓/平仓时间与价格、退出原因、扣费后的毛 R 与
+净 R、净 U、持仓根数）；
+- 一行 HOL 快照，记录数据末端仍未平仓的那笔持仓。
 
 Why: TradingView gives strategy() scripts a built-in trade list, but
 indicator() scripts get nothing — no ledger, no trade list, no reconciliation.
 With this ledger, every trade your indicator makes on the chart can be
 exported and checked line-by-line against an external backtest engine.
 No trade exists unless it is in the ledger.
+为什么需要它：TradingView 给 strategy()（策略）脚本内置了逐笔交易清单，
+却什么都不给 indicator()（指标）脚本 —— 没账本、没清单、没法对账。
+有了这本账，你的指标在图上做的每一笔，都能导出并与外部回测引擎
+逐行核对。不在账上的交易，就等于不存在。
 
 How to use: copy the template block from the GitHub repo into your own
 indicator, then call three functions at your signal/entry/exit events:
 f_ord_signal(), f_ord_open(), f_ord_close(). The EMA crossover in this
 script is only a demo host — delete it and keep the ledger block.
+用法：把 GitHub 仓库里的模板区块复制进你自己的指标，在你的信号 /
+开仓 / 平仓事件处调用三个函数：f_ord_signal()、f_ord_open()、
+f_ord_close()。本脚本里的 EMA 交叉只是演示宿主 —— 删掉它，
+只保留账本区块即可。
 
 Scope: this template only does accounting and export. It makes no
 performance claims, and the host indicator's signals and logic remain
 entirely its author's. Default fee 0.05%/side; the R distance is defined
 by the host at entry (see the repo docs for the format spec).
+范围：本模板只负责记账与导出，不作任何收益方面的宣称；宿主指标的
+信号与逻辑完全归其作者所有。默认手续费 0.05%/边；R 距离由宿主在
+开仓时定义（格式规范见仓库文档）。
 
 Format spec & integration guide (GitHub):
+格式规范与接入指南（GitHub）：
 License: MIT (ledger template).
+许可：MIT（账本模板）。
 ```
 
 ---
