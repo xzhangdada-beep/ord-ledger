@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════
-// ORD 账本模板 v1.0(2026-10-22 定稿) — 给任何 Pine 指标套用的逐笔可对账账本
+// ORD 账本模板 v1.1(2026-10-23 修复版;v1.0 定稿于 2026-10-22) — 给任何 Pine 指标套用的逐笔可对账账本
 // ───────────────────────────────────────────────────────────────────────
 // 这是什么:一段可整段粘贴进任意 indicator() 脚本的记账代码块。
 // 它让宿主指标在运行时把每一笔模拟交易记成 CSV 行,经 Pine 日志
@@ -56,18 +56,25 @@ ordTblPos  = input.string("右上", "状态小表位置", options = ["右上", "
 float ordRiskU   = ordCapital * ordRiskPct / 100.0  // 每笔计划风险 U(默认 400×1% = 4U)
 float ordFeeRate = ordFeePct / 100.0               // 手续费率(默认 0.0005)
 
-// ── 2. 账本状态(全部 ord_ 前缀,避免与宿主变量撞名)──
-var int   ordPosDir    = 0     // 1=多 / -1=空 / 0=空仓(本模板为单仓账本)
-var float ordEntryPx   = na    // 开仓价
-var float ordEntryRd   = na    // 进场根 R 距离(由宿主在开仓时提供)
-var int   ordEntryTime = na    // 开仓根 time_close(UTC 收盘时刻,毫秒)
-var int   ordEntryBar  = na    // 开仓根 bar_index(算持仓根数用)
-var int   ordOidSeq    = 0     // 单号计数(开仓时自增)
-var int   ordClosedCnt = 0     // 已平仓笔数
-var int   ordSigLong   = 0     // 多头信号数(宿主经 f_ord_signal 上报)
-var int   ordSigShort  = 0     // 空头信号数
-var bool  ordHdrDone   = false // CFG+表头只打一次
-var int   ordHolBar    = na    // HOL 快照去重(同一根只打一行)
+// ── 2. 账本状态:全部装在一个对象(UDT)里 ──
+// 为什么用对象:Pine 硬规则 —— 函数内不能给全局变量赋值(CE10088),
+// 但对象字段可以改。账本 API 都是函数,状态必须放对象里才能写。
+// (v1.0 用散装全局变量,在 TV 上编译报 15 个 CE10088;v1.1 改对象版,
+//  API 签名与 CFG/ORD/HOL 输出格式与 v1.0 逐字不变。)
+type OrdState
+    int posDir      // 1=多 / -1=空 / 0=空仓(本模板为单仓账本)
+    float entryPx   // 开仓价
+    float entryRd   // 进场根 R 距离(由宿主在开仓时提供)
+    int entryTime   // 开仓根 time_close(UTC 收盘时刻,毫秒)
+    int entryBar    // 开仓根 bar_index(算持仓根数用)
+    int oidSeq      // 单号计数(开仓时自增)
+    int closedCnt   // 已平仓笔数
+    int sigLong     // 多头信号数(宿主经 f_ord_signal 上报)
+    int sigShort    // 空头信号数
+    bool hdrDone    // CFG+表头只打一次
+    int holBar      // HOL 快照去重(同一根只打一行)
+
+var OrdState ordS = OrdState.new(0, na, na, na, na, 0, 0, 0, 0, false, na)
 
 // ── 3. 工具函数 ──
 // 毫秒时间戳 → "yyyy-MM-dd HH:mm"(UTC)。账本时间一律 UTC、记 K 线收盘时刻;
@@ -92,10 +99,10 @@ f_ord_confirmed() =>
 // 只计数供状态小表与 CFG 后对账核对,不影响开平仓。dir: 1=多 / -1=空。
 f_ord_signal(int dir) =>
     if dir == 1
-        ordSigLong := ordSigLong + 1
+        ordS.sigLong := ordS.sigLong + 1
     else if dir == -1
-        ordSigShort := ordSigShort + 1
-    ordSigLong + ordSigShort
+        ordS.sigShort := ordS.sigShort + 1
+    ordS.sigLong + ordS.sigShort
 
 // 在宿主的开仓事件处调用。
 // dir: 1=多 / -1=空
@@ -107,14 +114,14 @@ f_ord_signal(int dir) =>
 // 注意:同根先平仓再反手时,先调 f_ord_close 再调 f_ord_open(与引擎同序)。
 f_ord_open(int dir, float px, float rd, int tClose) =>
     int res = na
-    if ordPosDir == 0 and (dir == 1 or dir == -1) and not na(px) and not na(rd) and rd > 0
-        ordOidSeq    := ordOidSeq + 1
-        ordPosDir    := dir
-        ordEntryPx   := px
-        ordEntryRd   := rd
-        ordEntryTime := tClose
-        ordEntryBar  := bar_index
-        res          := ordOidSeq
+    if ordS.posDir == 0 and (dir == 1 or dir == -1) and not na(px) and not na(rd) and rd > 0
+        ordS.oidSeq    := ordS.oidSeq + 1
+        ordS.posDir    := dir
+        ordS.entryPx   := px
+        ordS.entryRd   := rd
+        ordS.entryTime := tClose
+        ordS.entryBar  := bar_index
+        res          := ordS.oidSeq
     res
 
 // 在宿主的平仓事件处调用,输出一行 ORD。
@@ -125,37 +132,37 @@ f_ord_open(int dir, float px, float rd, int tClose) =>
 // 净R = ((平仓价 − 开仓价) × 方向 − 费率 × (开仓价 + 平仓价)) / R距离;净U = 净R × 每笔计划风险。
 f_ord_close(float px, string reason, int tClose) =>
     float res = na
-    if ordPosDir != 0 and not na(px)
-        int d       = ordPosDir
-        float gR    = (px - ordEntryPx) * d / ordEntryRd
-        float feeR  = ordFeeRate * (ordEntryPx + px) / ordEntryRd
+    if ordS.posDir != 0 and not na(px)
+        int d       = ordS.posDir
+        float gR    = (px - ordS.entryPx) * d / ordS.entryRd
+        float feeR  = ordFeeRate * (ordS.entryPx + px) / ordS.entryRd
         float nR    = gR - feeR
-        ordClosedCnt := ordClosedCnt + 1
+        ordS.closedCnt := ordS.closedCnt + 1
         if ordLog
-            log.info(str.format("ORD,{0},{1},{2},{3},{4,number,#.######},{5,number,#.######},{6},{7,number,#.######},{8,number,#.####},{9,number,#.####},{10,number,#.####},{11,number,#.##},{12}", ordOidSeq, d == 1 ? "多" : "空", f_ord_ms(ordEntryTime), f_ord_ms(tClose), ordEntryPx, px, reason, ordEntryRd, gR, feeR, nR, nR * ordRiskU, bar_index - ordEntryBar))
+            log.info(str.format("ORD,{0},{1},{2},{3},{4,number,#.######},{5,number,#.######},{6},{7,number,#.######},{8,number,#.####},{9,number,#.####},{10,number,#.####},{11,number,#.##},{12}", ordS.oidSeq, d == 1 ? "多" : "空", f_ord_ms(ordS.entryTime), f_ord_ms(tClose), ordS.entryPx, px, reason, ordS.entryRd, gR, feeR, nR, nR * ordRiskU, bar_index - ordS.entryBar))
         res          := nR
-        ordPosDir    := 0
-        ordEntryPx   := na
-        ordEntryRd   := na
-        ordEntryTime := na
-        ordEntryBar  := na
+        ordS.posDir    := 0
+        ordS.entryPx   := na
+        ordS.entryRd   := na
+        ordS.entryTime := na
+        ordS.entryBar  := na
     res
 
 // 模板尾巴每根自动调用,宿主不用管:
 // 在最后一根上、若有未平仓仓位,输出一行 HOL(同单号每根一行,对账时取最后一行;
 // 已有 ORD 的单号在对账时忽略其 HOL)。对应外部引擎的 data_end 末笔。
 f_ord_snapshot() =>
-    if ordLog and barstate.islast and ordPosDir != 0 and ordHolBar != bar_index
-        ordHolBar := bar_index
-        float uR = ((close - ordEntryPx) * ordPosDir - ordFeeRate * (ordEntryPx + close)) / ordEntryRd
-        log.info(str.format("HOL,{0},{1},{2},{3,number,#.######},{4,number,#.######},{5,number,#.######},{6,number,#.####}", ordOidSeq, ordPosDir == 1 ? "多" : "空", f_ord_ms(ordEntryTime), ordEntryPx, ordEntryRd, close, uR))
-    ordPosDir
+    if ordLog and barstate.islast and ordS.posDir != 0 and ordS.holBar != bar_index
+        ordS.holBar := bar_index
+        float uR = ((close - ordS.entryPx) * ordS.posDir - ordFeeRate * (ordS.entryPx + close)) / ordS.entryRd
+        log.info(str.format("HOL,{0},{1},{2},{3,number,#.######},{4,number,#.######},{5,number,#.######},{6,number,#.####}", ordS.oidSeq, ordS.posDir == 1 ? "多" : "空", f_ord_ms(ordS.entryTime), ordS.entryPx, ordS.entryRd, close, uR))
+    ordS.posDir
 
 // ── 5. CFG 首行 + 表头(脚本首根各打印一次,CFG 在最前,参数与周期自证)──
-if not ordHdrDone
-    ordHdrDone := true
+if not ordS.hdrDone
+    ordS.hdrDone := true
     if ordLog
-        log.info(str.format("CFG,脚本={0},账本=ORD模板v1.0,图表周期={1},蜡烛=真实K线,口径={2},R定义={3},手续费={4,number,#.###}%/边,净U=净R*{5,number,#.##}U,时间=UTC收盘时刻,数据首根={6}", ordName, timeframe.period, ordStyle, ordRDef, ordFeePct, ordRiskU, str.format_time(time, "yyyy-MM-dd HH:mm", "UTC")))
+        log.info(str.format("CFG,脚本={0},账本=ORD模板v1.1,图表周期={1},蜡烛=真实K线,口径={2},R定义={3},手续费={4,number,#.###}%/边,净U=净R*{5,number,#.##}U,时间=UTC收盘时刻,数据首根={6}", ordName, timeframe.period, ordStyle, ordRDef, ordFeePct, ordRiskU, str.format_time(time, "yyyy-MM-dd HH:mm", "UTC")))
         log.info("ORD,编号,方向,开仓时间,平仓时间,开仓价,平仓价,退出原因,R距离,毛R,手续费R,净R,净U,持仓根数")
         log.info("HOL,编号,方向,开仓时间,开仓价,R距离,最新收盘,未实现净R")
 
@@ -163,20 +170,20 @@ if not ordHdrDone
 var table ordTbl = table.new(f_ord_pos(ordTblPos), 2, 6, border_width = 1)
 f_ord_table() =>
     if ordShowTbl and barstate.islast
-        string posTxt = ordPosDir == 1 ? "多 @ " + str.tostring(ordEntryPx, "#.####") : ordPosDir == -1 ? "空 @ " + str.tostring(ordEntryPx, "#.####") : "空仓"
+        string posTxt = ordS.posDir == 1 ? "多 @ " + str.tostring(ordS.entryPx, "#.####") : ordS.posDir == -1 ? "空 @ " + str.tostring(ordS.entryPx, "#.####") : "空仓"
         table.cell(ordTbl, 0, 0, "ORD 账本", text_color = color.white, bgcolor = color.new(color.gray, 20), text_size = size.small)
-        table.cell(ordTbl, 1, 0, "v1.0", text_color = color.white, bgcolor = color.new(color.gray, 20), text_size = size.small)
+        table.cell(ordTbl, 1, 0, "v1.1", text_color = color.white, bgcolor = color.new(color.gray, 20), text_size = size.small)
         table.cell(ordTbl, 0, 1, "信号总数", text_color = color.white, text_size = size.small)
-        table.cell(ordTbl, 1, 1, str.tostring(ordSigLong + ordSigShort), text_color = color.white, text_size = size.small)
+        table.cell(ordTbl, 1, 1, str.tostring(ordS.sigLong + ordS.sigShort), text_color = color.white, text_size = size.small)
         table.cell(ordTbl, 0, 2, "多头信号", text_color = color.white, text_size = size.small)
-        table.cell(ordTbl, 1, 2, str.tostring(ordSigLong), text_color = color.new(color.green, 0), text_size = size.small)
+        table.cell(ordTbl, 1, 2, str.tostring(ordS.sigLong), text_color = color.new(color.green, 0), text_size = size.small)
         table.cell(ordTbl, 0, 3, "空头信号", text_color = color.white, text_size = size.small)
-        table.cell(ordTbl, 1, 3, str.tostring(ordSigShort), text_color = color.new(color.red, 0), text_size = size.small)
+        table.cell(ordTbl, 1, 3, str.tostring(ordS.sigShort), text_color = color.new(color.red, 0), text_size = size.small)
         table.cell(ordTbl, 0, 4, "已平仓笔数", text_color = color.white, text_size = size.small)
-        table.cell(ordTbl, 1, 4, str.tostring(ordClosedCnt), text_color = color.white, text_size = size.small)
+        table.cell(ordTbl, 1, 4, str.tostring(ordS.closedCnt), text_color = color.white, text_size = size.small)
         table.cell(ordTbl, 0, 5, "当前持仓", text_color = color.white, text_size = size.small)
         table.cell(ordTbl, 1, 5, posTxt, text_color = color.white, text_size = size.small)
-    ordPosDir
+    ordS.posDir
 
 // ── 7. 模板尾巴(每根执行,内部自带门控)──
 // 这两行就地保留也能工作(HOL/状态表只对最后一根生效,实时图上后续
@@ -205,13 +212,13 @@ bool goShort  = ta.crossunder(emaFast, emaSlow) and f_ord_confirmed()
 
 if goLong
     f_ord_signal(1)                                // 接入点 1:信号登记
-    if ordPosDir == -1
+    if ordS.posDir == -1
         f_ord_close(close, "翻转", time_close)     // 接入点 3:先平旧仓
     f_ord_open(1, close, demoRd, time_close)       // 接入点 2:再开新仓
 
 if goShort
     f_ord_signal(-1)                               // 接入点 1
-    if ordPosDir == 1
+    if ordS.posDir == 1
         f_ord_close(close, "翻转", time_close)     // 接入点 3
     f_ord_open(-1, close, demoRd, time_close)      // 接入点 2
 
